@@ -162,7 +162,7 @@ def ingest_document(doc_input: DocumentInput) -> Document:
         text=cleaned_text, # Return full text
         title=doc_input.title,
         metadata=doc_input.metadata,
-        vector_id=-1 # Placeholder
+        vector_id=vector_id
     )
 
 def create_edge(edge_input: EdgeInput):
@@ -176,6 +176,7 @@ def create_edge(edge_input: EdgeInput):
     """
     
     with neo4j_driver.get_session() as session:
+        logger.info(f"Creating edge from {edge_input.source} to {edge_input.target}")
         result = session.run(query, 
                     source_id=edge_input.source, 
                     target_id=edge_input.target, 
@@ -183,6 +184,65 @@ def create_edge(edge_input: EdgeInput):
                     metadata=edge_input.metadata)
         record = result.single()
         if not record:
-            logger.warning(f"Could not create edge between {edge_input.source} and {edge_input.target}")
+            logger.error(f"Could not create edge between {edge_input.source} and {edge_input.target}. Nodes might not exist.")
             return None
         return record['r']
+
+def get_node(node_id: str):
+    query = "MATCH (n {id: $id}) RETURN n"
+    with neo4j_driver.get_session() as session:
+        res = session.run(query, id=node_id)
+        record = res.single()
+        if record:
+            return dict(record['n'])
+    return None
+
+def update_node(node_id: str, doc_input: DocumentInput):
+    # 1. Update Neo4j
+    query = """
+    MATCH (n {id: $id})
+    SET n.text = $text, n.title = $title
+    SET n += $metadata
+    RETURN n
+    """
+    with neo4j_driver.get_session() as session:
+        res = session.run(query, id=node_id, text=doc_input.text, title=doc_input.title, metadata=doc_input.metadata)
+        record = res.single()
+        if not record:
+            return None
+        node = record['n']
+    
+    # 2. Update FAISS if text changed and it's a Document
+    if "Document" in node.labels and node.get('vector_id') is not None:
+        embedding = embedding_service.encode(doc_input.text)
+        faiss_index.update_document(node_id, embedding)
+        
+    return dict(node)
+
+def delete_node(node_id: str):
+    # 1. Delete from Neo4j
+    query = "MATCH (n {id: $id}) DETACH DELETE n"
+    with neo4j_driver.get_session() as session:
+        session.run(query, id=node_id)
+        
+    # 2. Remove from FAISS
+    faiss_index.remove_document(node_id)
+    return True
+
+def get_edge(edge_id: str):
+    # Using elementId for edge lookup
+    query = "MATCH ()-[r]-() WHERE elementId(r) = $id RETURN r"
+    with neo4j_driver.get_session() as session:
+        res = session.run(query, id=edge_id)
+        record = res.single()
+        if record:
+            r = record['r']
+            return {
+                "id": r.element_id,
+                "type": r.type,
+                "properties": dict(r),
+                # Try to get 'id' property of nodes, fallback to elementId
+                "source": r.start_node.get('id') if 'id' in r.start_node else r.start_node.element_id,
+                "target": r.end_node.get('id') if 'id' in r.end_node else r.end_node.element_id
+            }
+    return None

@@ -72,6 +72,18 @@ class FaissIndex:
     def count(self):
         return self.index.ntotal
 
+    def remove_document(self, doc_id: str):
+        """Soft delete: Remove from id_map so it's ignored in search."""
+        keys_to_remove = [k for k, v in self.id_map.items() if v == doc_id]
+        for k in keys_to_remove:
+            del self.id_map[k]
+        self.save()
+
+    def update_document(self, doc_id: str, embedding: np.ndarray):
+        """Update: Soft delete old vectors, add new one."""
+        self.remove_document(doc_id)
+        self.add(embedding, doc_id)
+
 # Global instances
 neo4j_driver = Neo4jDriver()
 faiss_index = FaissIndex()
