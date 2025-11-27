@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hybrid Retrieval Demo</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .section {
+            margin-bottom: 30px;
+            border: 1px solid #ccc;
+            padding: 15px;
+            border-radius: 5px;
+        }
+
+        h2 {
+            margin-top: 0;
+        }
+
+        input,
+        textarea,
+        button {
+            margin: 5px 0;
+            padding: 8px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        pre {
+            background: #f4f4f4;
+            padding: 10px;
+            overflow-x: auto;
+        }
+
+        .result-item {
+            border-bottom: 1px solid #eee;
+            padding: 10px 0;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Hybrid Vector + Graph Retrieval</h1>
+
+    <div class="section">
+        <h2>1. Ingest Document</h2>
+        <input type="text" id="docTitle" placeholder="Title">
+        <textarea id="docText" rows="4" placeholder="Content text..."></textarea>
+        <button onclick="ingestDoc()">Ingest</button>
+        <div id="ingestResult"></div>
+    </div>
+
+    <div class="section">
+        <h2>2. Create Relationship</h2>
+        <input type="text" id="sourceId" placeholder="Source Node ID">
+        <input type="text" id="targetId" placeholder="Target Node ID">
+        <input type="text" id="relType" placeholder="Type (e.g. MENTIONS)">
+        <button onclick="createEdge()">Create Edge</button>
+        <div id="edgeResult"></div>
+    </div>
+
+    <div class="section">
+        <h2>3. Search</h2>
+        <input type="text" id="searchQuery" placeholder="Query text...">
+        <select id="searchType">
+            <option value="vector">Vector Search</option>
+            <option value="hybrid">Hybrid Search</option>
+        </select>
+        <button onclick="search()">Search</button>
+        <div id="searchResults"></div>
+    </div>
+
+    <div class="section">
+        <h2>4. Graph Visualization</h2>
+        <input type="text" id="vizStartId" placeholder="Start Node ID">
+        <button onclick="visualizeGraph()">Visualize Neighborhood</button>
+        <div id="network" style="height: 400px; border: 1px solid #ddd; margin-top: 10px;"></div>
+    </div>
+
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <script>
+        const API_URL = "http://localhost:8000";
+
+        async function ingestDoc() {
+            const title = document.getElementById('docTitle').value;
+            const text = document.getElementById('docText').value;
+
+            const res = await fetch(`${API_URL}/nodes`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title, text, metadata: { type: 'manual' } })
+            });
+            const data = await res.json();
+            document.getElementById('ingestResult').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+        }
+
+        async function createEdge() {
+            const source = document.getElementById('sourceId').value;
+            const target = document.getElementById('targetId').value;
+            const type = document.getElementById('relType').value;
+
+            const res = await fetch(`${API_URL}/edges`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source, target, type, weight: 1.0 })
+            });
+            const data = await res.json();
+            document.getElementById('edgeResult').innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+        }
+
+        async function search() {
+            const query = document.getElementById('searchQuery').value;
+            const type = document.getElementById('searchType').value;
+            let endpoint = '/search/vector';
+            let body = { query_text: query, top_k: 5 };
+
+            if (type === 'hybrid') {
+                endpoint = '/search/hybrid';
+                body = { ...body, vector_weight: 0.7, graph_weight: 0.3 };
+            }
+
+            const res = await fetch(`${API_URL}${endpoint}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const data = await res.json();
+
+            let html = '';
+            data.forEach(item => {
+                html += `<div class="result-item">
+                    <strong>${item.metadata.title || 'No Title'}</strong> (Score: ${item.score.toFixed(4)})<br>
+                    <small>ID: ${item.id}</small><br>
+                    <p>${item.text}</p>
+                    ${item.graph_info ? `<pre>Graph Info: ${JSON.stringify(item.graph_info)}</pre>` : ''}
+                </div>`;
+            });
+            document.getElementById('searchResults').innerHTML = html || 'No results found.';
+        }
+
+        async function visualizeGraph() {
+            const startId = document.getElementById('vizStartId').value;
+            const res = await fetch(`${API_URL}/search/graph?start_id=${startId}&depth=2`);
+            const data = await res.json();
+
+            const nodes = new vis.DataSet();
+            const edges = new vis.DataSet();
+            const addedNodes = new Set();
+
+            // Add start node
+            if (!addedNodes.has(startId)) {
+                nodes.add({ id: startId, label: 'Start', color: '#fb7e81' });
+                addedNodes.add(startId);
+            }
+
+            data.forEach(item => {
+                const node = item.node;
+                if (!addedNodes.has(node.id)) {
+                    nodes.add({
+                        id: node.id,
+                        label: node.title || node.name || node.text.substring(0, 10) + '...',
+                        title: JSON.stringify(node, null, 2)
+                    });
+                    addedNodes.add(node.id);
+                }
+                // Since the API returns nodes and hops, but not explicit edges in the response list (it traverses),
+                // we might need to adjust the API to return edges or infer them.
+                // The current GET /search/graph returns a list of {node, hops}.
+                // It doesn't return the relationships explicitly.
+                // For visualization, we really need the edges.
+                // Let's assume for now we just show nodes.
+                // To show edges, we would need to update the API to return paths or edges.
+            });
+
+            // NOTE: The current API implementation of GET /search/graph returns nodes, but not the edges connecting them.
+            // To properly visualize, we should update the API to return relationships as well.
+            // For now, I will just display the nodes.
+
+            const container = document.getElementById('network');
+            const networkData = { nodes: nodes, edges: edges };
+            const options = {};
+            new vis.Network(container, networkData, options);
+        }
+    </script>
+</body>
+
+</html>
