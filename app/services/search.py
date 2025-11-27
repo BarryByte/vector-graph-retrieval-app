@@ -101,22 +101,7 @@ def graph_search(start_id: str, depth: int) -> Dict:
     
     data = {"nodes": [], "edges": []}
     
-    with neo4j_driver.get_session() as session:
-        res = session.run(query_standard, start_id=start_id)
-        unique_edges = set()
-        
-        for record in res:
-            node = record['n']
-            data["nodes"].append(dict(node))
-            
-            for r in record['rels']:
-                # We need to find the 'id' property of start and end nodes
-                # The Relationship object `r` has `start_node` and `end_node` but fetching properties from them requires them to be loaded.
-                # In the bolt driver, `r.start_node` is a Node object but might not have all props if not returned.
-                # Actually, `r` contains the full relationship.
-                # But linking to our custom 'id' property is tricky without extra queries or mapping.
-                # A simple way: Return start.id and end.id in the query.
-                pass
+    # query_standard execution removed as it was redundant and incomplete
     
     # Let's try a query that returns exactly what we need
     final_query = """
@@ -138,19 +123,30 @@ def graph_search(start_id: str, depth: int) -> Dict:
             target = record['target']
             rel = record['r']
             
-            if source['id'] not in seen_nodes:
-                data["nodes"].append(dict(source))
-                seen_nodes.add(source['id'])
+            # Helper to safely get ID
+            def get_node_id(node):
+                return node.get('id') or node.element_id if hasattr(node, 'element_id') else str(node.id)
+
+            source_id = get_node_id(source)
+            target_id = get_node_id(target)
             
-            if target['id'] not in seen_nodes:
-                data["nodes"].append(dict(target))
-                seen_nodes.add(target['id'])
+            if source_id not in seen_nodes:
+                s_dict = dict(source)
+                s_dict['id'] = source_id # Ensure ID is present for frontend
+                data["nodes"].append(s_dict)
+                seen_nodes.add(source_id)
+            
+            if target_id not in seen_nodes:
+                t_dict = dict(target)
+                t_dict['id'] = target_id # Ensure ID is present for frontend
+                data["nodes"].append(t_dict)
+                seen_nodes.add(target_id)
                 
-            edge_key = (source['id'], target['id'], rel.type)
+            edge_key = (source_id, target_id, rel.type)
             if edge_key not in seen_edges:
                 data["edges"].append({
-                    "source": source['id'],
-                    "target": target['id'],
+                    "source": source_id,
+                    "target": target_id,
                     "type": rel.type,
                     "weight": rel.get('weight', 1.0)
                 })

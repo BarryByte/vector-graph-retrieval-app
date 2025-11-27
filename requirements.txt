@@ -13,3 +13,4 @@ streamlit-agraph
 beautifulsoup4
 langdetect
 html2text
+ftfy

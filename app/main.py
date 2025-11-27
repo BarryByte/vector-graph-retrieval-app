@@ -77,7 +77,7 @@ def search_vector(req: SearchRequest):
     return vector_search(req.query_text, req.top_k)
 
 @app.get("/search/graph")
-def search_graph(start_id: str, depth: int = 2):
+def search_graph(start_id: str, depth: int = 3):
     return graph_search(start_id, depth)
 
 @app.post("/search/hybrid", response_model=List[SearchResult])

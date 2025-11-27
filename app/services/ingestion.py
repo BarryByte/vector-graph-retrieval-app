@@ -8,6 +8,9 @@ import spacy
 from bs4 import BeautifulSoup
 from langdetect import detect
 import numpy as np
+import ftfy
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,10 @@ def clean_text(text: str) -> str:
     
     # 2. Whitespace Cleaning
     cleaned = " ".join(text.split())
+
+    #3. Fix Text
+    cleaned = ftfy.fix_text(cleaned)
+
     return cleaned
 
 def recursive_chunking(text: str, chunk_size: int = 400, overlap: int = 50) -> list[str]:
