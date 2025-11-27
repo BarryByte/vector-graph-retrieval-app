@@ -1,3 +1,4 @@
+# File: requirements.txt
 fastapi
 uvicorn
 neo4j
@@ -9,3 +10,6 @@ requests
 pydantic
 streamlit
 streamlit-agraph
+beautifulsoup4
+langdetect
+html2text

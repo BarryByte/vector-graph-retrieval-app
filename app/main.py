@@ -1,3 +1,4 @@
+# File: app/main.py
 from fastapi import FastAPI, HTTPException
 from app.database import neo4j_driver
 from app.models import DocumentInput, Document, EdgeInput, SearchRequest, HybridSearchRequest, SearchResult
@@ -39,6 +40,35 @@ def create_relationship(edge: EdgeInput):
     if not result:
         raise HTTPException(status_code=400, detail="Could not create edge")
     return {"status": "created", "type": edge.type}
+
+# --- Debug / Inspection ---
+
+@app.get("/debug/documents")
+def get_all_documents():
+    query = "MATCH (d:Document) RETURN d"
+    documents = []
+    with neo4j_driver.get_session() as session:
+        result = session.run(query)
+        for record in result:
+            documents.append(record['d'])
+    return documents
+
+@app.get("/debug/faiss/info")
+def get_faiss_info():
+    from app.database import faiss_index
+    return {
+        "total_vectors": faiss_index.count(),
+        "dimension": faiss_index.dimension,
+        "id_map": faiss_index.id_map
+    }
+
+@app.get("/debug/faiss/vector/{vector_id}")
+def get_vector_by_id(vector_id: int):
+    from app.database import faiss_index
+    vector = faiss_index.get_vector(vector_id)
+    if not vector:
+        raise HTTPException(status_code=404, detail="Vector not found")
+    return {"vector_id": vector_id, "embedding": vector}
 
 # --- Search ---
 

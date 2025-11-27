@@ -1,3 +1,4 @@
+<!-- File: README.md -->
 # Hybrid Vector + Graph Retrieval System
 
 A powerful retrieval system that combines **Semantic Vector Search** (FAISS) with **Graph Knowledge Traversal** (Neo4j) to provide context-aware search results.

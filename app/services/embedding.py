@@ -1,3 +1,4 @@
+# File: app/services/embedding.py
 from sentence_transformers import SentenceTransformer
 from app.config import settings
 import numpy as np

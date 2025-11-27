@@ -1,3 +1,4 @@
+# File: app/database.py
 from neo4j import GraphDatabase
 import faiss
 import numpy as np
@@ -61,6 +62,15 @@ class FaissIndex:
                 data = pickle.load(f)
                 self.id_map = data["id_map"]
                 self.current_id = data["current_id"]
+
+    def get_vector(self, vector_id: int) -> list:
+        try:
+            return self.index.reconstruct(vector_id).tolist()
+        except:
+            return []
+
+    def count(self):
+        return self.index.ntotal
 
 # Global instances
 neo4j_driver = Neo4jDriver()
