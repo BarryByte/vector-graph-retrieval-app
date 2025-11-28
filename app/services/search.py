@@ -154,6 +154,7 @@ def graph_search(start_id: str, depth: int) -> Dict:
                 
     return data
 
+
 def hybrid_search(query_text: str, vector_weight: float, graph_weight: float, top_k: int, graph_depth: int) -> List[SearchResult]:
     # 1. NLP Query Parsing (Extract Entities)
     query_entities = []

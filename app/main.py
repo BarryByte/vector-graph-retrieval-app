@@ -1,7 +1,7 @@
 # File: app/main.py
 from fastapi import FastAPI, HTTPException
 from app.database import neo4j_driver
-from app.models import DocumentInput, Document, EdgeInput, SearchRequest, HybridSearchRequest, SearchResult
+from app.models import DocumentInput, Document, EdgeInput, SearchRequest, HybridSearchRequest, SearchResult, NodeUpdate
 from app.services.ingestion import ingest_document, create_edge, get_node, update_node, delete_node, get_edge
 from app.services.search import vector_search, graph_search, hybrid_search
 from typing import List
@@ -55,7 +55,7 @@ def read_node(node_id: str):
     return node
 
 @app.put("/nodes/{node_id}")
-def update_node_endpoint(node_id: str, doc: DocumentInput):
+def update_node_endpoint(node_id: str, doc: NodeUpdate):
     node = update_node(node_id, doc)
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
@@ -87,6 +87,16 @@ def get_all_documents():
             documents.append(record['d'])
     return documents
 
+@app.get("/debug/entities")
+def get_all_entities():
+    query = "MATCH (e:Entity) RETURN e"
+    entities = []
+    with neo4j_driver.get_session() as session:
+        result = session.run(query)
+        for record in result:
+            entities.append(record['e'])
+    return entities
+
 @app.get("/debug/faiss/info")
 def get_faiss_info():
     from app.database import faiss_index
@@ -111,7 +121,7 @@ def search_vector(req: SearchRequest):
     return vector_search(req.query_text, req.top_k)
 
 @app.get("/search/graph")
-def search_graph(start_id: str, depth: int = 3):
+def search_graph(start_id: str, depth: int ):
     return graph_search(start_id, depth)
 
 @app.post("/search/hybrid", response_model=List[SearchResult])

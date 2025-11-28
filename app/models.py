@@ -11,6 +11,12 @@ class Document(DocumentInput):
     id: str
     vector_id: Optional[int] = None
 
+class NodeUpdate(BaseModel):
+    text: Optional[str] = None
+    title: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = {}
+    regen_embedding: bool = False
+
 class Entity(BaseModel):
     id: Optional[str] = None
     name: str

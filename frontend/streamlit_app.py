@@ -253,7 +253,7 @@ elif page == "Graph Visualization":
 elif page == "Database Inspector":
     st.header("🕵️ Database Inspector")
     
-    tab1, tab2 = st.tabs(["Neo4j Documents", "FAISS Index"])
+    tab1, tab2, tab3 = st.tabs(["Neo4j Documents", "Neo4j Entities", "FAISS Index"])
     
     with tab1:
         st.subheader("Stored Documents")
@@ -299,6 +299,29 @@ elif page == "Database Inspector":
                 st.error(f"Error: {e}")
     
     with tab2:
+        st.subheader("Stored Entities")
+        if st.button("Refresh Entities"):
+            try:
+                res = requests.get(f"{API_URL}/debug/entities")
+                if res.status_code == 200:
+                    ents = res.json()
+                    st.write(f"Total Entities: {len(ents)}")
+                    
+                    ent_list = []
+                    for e in ents:
+                        ent_list.append({
+                            "ID": e.get("id"),
+                            "Name": e.get("name"),
+                            "Type": e.get("type")
+                        })
+                    
+                    st.dataframe(ent_list, use_container_width=True)
+                else:
+                    st.error("Failed to fetch entities")
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    with tab3:
         st.subheader("Vector Index Stats")
         if st.button("Refresh Stats"):
             try:

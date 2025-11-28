@@ -39,7 +39,7 @@ def clean_text(text: str) -> str:
 
     return cleaned
 
-def recursive_chunking(text: str, chunk_size: int = 400, overlap: int = 50) -> list[str]:
+def recursive_chunking(text: str, chunk_size: int = 256, overlap: int = 12) -> list[str]:
     """
     Recursive chunking strategy:
     1. Split by paragraphs (double newline).
@@ -55,6 +55,55 @@ def recursive_chunking(text: str, chunk_size: int = 400, overlap: int = 50) -> l
         if chunk:
             chunks.append(chunk)
     return chunks
+
+def _create_semantic_edges(doc_id: str, embedding: np.ndarray, vector_id: int):
+    """Creates RELATED_TO edges based on vector similarity."""
+    distances, indices = faiss_index.search(embedding, top_k=5)
+    
+    with neo4j_driver.get_session() as session:
+        for j, idx in enumerate(indices):
+            # Exclude self: if vector_id is valid, use it. Otherwise, check if neighbor_id is the same as doc_id.
+            neighbor_id = faiss_index.id_map.get(idx)
+            if idx != -1 and (vector_id != -1 and idx != vector_id) or (vector_id == -1 and neighbor_id != doc_id):
+                sim_score = float(distances[j])
+                if sim_score > 0.85:
+                    if neighbor_id:
+                        rel_query = """
+                        MATCH (a:Document {id: $id})
+                        MATCH (b:Document {id: $neighbor_id})
+                        MERGE (a)-[r:RELATED_TO]->(b)
+                        SET r.weight = $weight, r.type = 'semantic'
+                        """
+                        session.run(rel_query, id=doc_id, neighbor_id=neighbor_id, weight=sim_score)
+                        logger.info(f"Created Semantic Edge: {doc_id} <-> {neighbor_id} (Score: {sim_score:.4f})")
+
+def _extract_and_link_entities(doc_id: str, text: str):
+    """Extracts entities using NER and creates MENTIONS edges."""
+    if not nlp: return
+
+    doc = nlp(text)
+    with neo4j_driver.get_session() as session:
+        for ent in doc.ents:
+            if ent.label_ in ["ORG", "PERSON", "GPE", "DATE"]:
+                # Create Entity Node
+                # We use ON CREATE SET to assign an ID only if it's a new node
+                merge_entity_query = """
+                MERGE (e:Entity {name: $name, type: $type})
+                ON CREATE SET e.id = $id
+                RETURN e
+                """
+                # Generate a UUID for the entity (will be used only if created)
+                ent_id = str(uuid.uuid4())
+                session.run(merge_entity_query, name=ent.text, type=ent.label_, id=ent_id)
+                
+                # Create MENTIONS relationship
+                create_rel_query = """
+                MATCH (d:Document {id: $doc_id})
+                MATCH (e:Entity {name: $name, type: $type})
+                MERGE (d)-[r:MENTIONS]->(e)
+                SET r.weight = 1.0
+                """
+                session.run(create_rel_query, doc_id=doc_id, name=ent.text, type=ent.label_)
 
 def ingest_document(doc_input: DocumentInput) -> Document:
     logger.info(f"--- Starting Ingestion for Document: {doc_input.title} ---")
@@ -112,55 +161,15 @@ def ingest_document(doc_input: DocumentInput) -> Document:
                         chunk_index=i,
                         metadata=doc_input.metadata)
             
-            # 6. Semantic Edge Creation (RELATED_TO)
-            # Find similar existing chunks
-            # We query FAISS for top 5 similar chunks
-            # Note: This might return the current chunk itself if FAISS index isn't updated instantly or if we just added it.
-            # faiss_index.add updates the index immediately.
-            distances, indices = faiss_index.search(embedding, top_k=5)
-            
-            for j, idx in enumerate(indices):
-                if idx != -1 and idx != vector_id: # Exclude self
-                    sim_score = float(distances[j]) # Inner product is cosine similarity if normalized
-                    if sim_score > 0.85:
-                        neighbor_id = faiss_index.id_map.get(idx)
-                        if neighbor_id:
-                            # Create semantic edge
-                            rel_query = """
-                            MATCH (a:Document {id: $id})
-                            MATCH (b:Document {id: $neighbor_id})
-                            MERGE (a)-[r:RELATED_TO]->(b)
-                            SET r.weight = $weight, r.type = 'semantic'
-                            """
-                            session.run(rel_query, id=doc_id, neighbor_id=neighbor_id, weight=sim_score)
-                            logger.info(f"Created Semantic Edge: {doc_id} <-> {neighbor_id} (Score: {sim_score:.4f})")
+        # 6. Semantic Edge Creation
+        _create_semantic_edges(doc_id, embedding, vector_id)
 
-            # 7. NER Extraction & Edge Creation
-            if nlp:
-                doc = nlp(chunk_text)
-                for ent in doc.ents:
-                    # Only specific types
-                    if ent.label_ in ["ORG", "PERSON", "GPE", "DATE"]:
-                        # Create Entity Node
-                        merge_entity_query = """
-                        MERGE (e:Entity {name: $name, type: $type})
-                        RETURN e
-                        """
-                        session.run(merge_entity_query, name=ent.text, type=ent.label_)
-                        
-                        # Create MENTIONS relationship
-                        create_rel_query = """
-                        MATCH (d:Document {id: $doc_id})
-                        MATCH (e:Entity {name: $name, type: $type})
-                        MERGE (d)-[r:MENTIONS]->(e)
-                        SET r.weight = 1.0
-                        """
-                        session.run(create_rel_query, doc_id=doc_id, name=ent.text, type=ent.label_)
+        # 7. NER Extraction & Edge Creation
+        _extract_and_link_entities(doc_id, chunk_text)
 
     return Document(
         id=first_doc_id if first_doc_id else "error",
-        text=cleaned_text, # Return full text
-        title=doc_input.title,
+        text=cleaned_text, # Return full ext
         metadata=doc_input.metadata,
         vector_id=vector_id
     )
@@ -189,35 +198,84 @@ def create_edge(edge_input: EdgeInput):
         return record['r']
 
 def get_node(node_id: str):
-    query = "MATCH (n {id: $id}) RETURN n"
+    query = """
+    MATCH (n {id: $id})
+    OPTIONAL MATCH (n)-[r]->(target)
+    RETURN n, collect({
+        target_id: coalesce(target.id, elementId(target)), 
+        type: type(r), 
+        weight: coalesce(r.weight, 1.0)
+    }) as relationships
+    """
     with neo4j_driver.get_session() as session:
         res = session.run(query, id=node_id)
         record = res.single()
         if record:
-            return dict(record['n'])
+            node_data = dict(record['n'])
+            # Filter out empty relationships (if OPTIONAL MATCH found nothing)
+            rels = [r for r in record['relationships'] if r['target_id'] is not None]
+            node_data['relationships'] = rels
+            return node_data
     return None
 
-def update_node(node_id: str, doc_input: DocumentInput):
+def update_node(node_id: str, update_data: "NodeUpdate"):
     # 1. Update Neo4j
-    query = """
-    MATCH (n {id: $id})
-    SET n.text = $text, n.title = $title
-    SET n += $metadata
-    RETURN n
-    """
-    with neo4j_driver.get_session() as session:
-        res = session.run(query, id=node_id, text=doc_input.text, title=doc_input.title, metadata=doc_input.metadata)
-        record = res.single()
-        if not record:
-            return None
-        node = record['n']
+    # Build dynamic SET clause
+    set_clauses = []
+    params = {"id": node_id}
     
-    # 2. Update FAISS if text changed and it's a Document
-    if "Document" in node.labels and node.get('vector_id') is not None:
-        embedding = embedding_service.encode(doc_input.text)
-        faiss_index.update_document(node_id, embedding)
+    if update_data.text is not None:
+        set_clauses.append("n.text = $text")
+        params["text"] = update_data.text
+    if update_data.title is not None:
+        set_clauses.append("n.title = $title")
+        params["title"] = update_data.title
+    if update_data.metadata:
+        set_clauses.append("n += $metadata")
+        params["metadata"] = update_data.metadata
         
-    return dict(node)
+    if not set_clauses:
+        # Nothing to update in Neo4j, but maybe embedding regen requested?
+        pass
+    else:
+        query = f"MATCH (n {{id: $id}}) SET {', '.join(set_clauses)} RETURN n"
+        with neo4j_driver.get_session() as session:
+            res = session.run(query, **params)
+            record = res.single()
+            if not record:
+                return None
+            # node = record['n'] # We'll fetch fresh below anyway
+            
+    # Fetch fresh node to check labels and current text
+    node_data = get_node(node_id)
+    if not node_data: return None
+
+    # 2. Update FAISS & Relationships if requested
+    if update_data.regen_embedding and "Document" in node_data.get('labels', ['Document']) and node_data.get('vector_id') is not None:
+        text_to_embed = update_data.text if update_data.text is not None else node_data.get('text')
+        if text_to_embed:
+            # A. Update Vector
+            embedding = embedding_service.encode(text_to_embed)
+            faiss_index.update_document(node_id, embedding)
+            logger.info(f"Regenerated embedding for node {node_id}")
+            
+            # B. Delete Old Relationships
+            del_query = """
+            MATCH (n {id: $id})-[r:RELATED_TO|MENTIONS]->()
+            DELETE r
+            """
+            with neo4j_driver.get_session() as session:
+                session.run(del_query, id=node_id)
+                logger.info(f"Deleted old relationships for node {node_id}")
+            
+            # C. Re-create Relationships
+            _create_semantic_edges(node_id, embedding, -1) 
+            _extract_and_link_entities(node_id, text_to_embed)
+            
+            # Refresh node data to include new relationships
+            node_data = get_node(node_id)
+        
+    return node_data
 
 def delete_node(node_id: str):
     # 1. Delete from Neo4j
