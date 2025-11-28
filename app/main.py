@@ -1,5 +1,5 @@
 # File: app/main.py
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from app.database import neo4j_driver
 from app.models import DocumentInput, Document, EdgeInput, SearchRequest, HybridSearchRequest, SearchResult, NodeUpdate
 from app.services.ingestion import ingest_document, create_edge, get_node, update_node, delete_node, get_edge
@@ -121,8 +121,8 @@ def search_vector(req: SearchRequest):
     return vector_search(req.query_text, req.top_k)
 
 @app.get("/search/graph")
-def search_graph(start_id: str, depth: int ):
-    return graph_search(start_id, depth)
+def search_graph(start_id: str, depth: int, relationship_types: List[str] = Query(None)):
+    return graph_search(start_id, depth, relationship_types)
 
 @app.post("/search/hybrid", response_model=List[SearchResult])
 def search_hybrid(req: HybridSearchRequest):

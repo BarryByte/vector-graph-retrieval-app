@@ -5,6 +5,7 @@ from app.models import SearchResult
 from typing import List, Dict, Set
 import logging
 import spacy
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -43,75 +44,30 @@ def vector_search(query_text: str, top_k: int) -> List[SearchResult]:
                 ))
     return results
 
-def graph_search(start_id: str, depth: int) -> Dict:
+def graph_search(start_id: str, depth: int, relationship_types: List[str] = None) -> Dict:
+    # Construct relationship pattern
+    # If types provided: -[:TYPE1|TYPE2*1..depth]-
+    # If not: -[*1..depth]-
+    
+    rel_pattern = ""
+    if relationship_types:
+        # Sanitize types to prevent injection (basic check)
+        safe_types = [t for t in relationship_types if t.isalnum() or "_" in t]
+        if safe_types:
+            rel_pattern = ":" + "|".join(safe_types)
+            
     # Fetch nodes and relationships within depth
-    query = """
-    MATCH p=(start {id:$start_id})-[*1..%d]-(n)
-    UNWIND relationships(p) AS r
-    RETURN start, n, collect(DISTINCT r) AS rels
-    """ % depth
-    
-    nodes = {}
-    edges = []
-    
-    with neo4j_driver.get_session() as session:
-        res = session.run(query, start_id=start_id)
-        for record in res:
-            # Add start node
-            start_node = record['start']
-            nodes[start_node['id']] = dict(start_node)
-            
-            # Add other node
-            node = record['n']
-            nodes[node['id']] = dict(node)
-            
-            # Add edges
-            for r in record['rels']:
-                edges.append({
-                    "source": r.start_node['id'], # Note: Neo4j driver returns start_node/end_node objects but they might not have 'id' property if not loaded. 
-                    # Actually, r.start_node.id is the internal ID. We stored 'id' as a property.
-                    # We need to be careful here. The driver returns Relationship objects.
-                    # It's safer to return properties.
-                    "id": r.element_id if hasattr(r, 'element_id') else r.id,
-                    "type": r.type,
-                    "properties": dict(r),
-                    # We need the 'id' property of the nodes to link them in vis.js
-                    # But r.start_node only gives us the node reference.
-                    # Let's adjust the query to return source/target IDs explicitly.
-                })
-
-    # Better Query for explicit IDs
-    query_explicit = """
-    MATCH (start {id:$start_id})
-    CALL apoc.path.subgraphAll(start, {maxLevel: %d})
-    YIELD nodes, relationships
-    RETURN nodes, relationships
-    """ % depth
-    
-    # Fallback if APOC is not available (Community Edition often has it but maybe not enabled)
-    # Let's use standard Cypher
-    query_standard = """
-    MATCH (start {id:$start_id})-[*0..%d]-(n)
-    WITH collect(distinct n) as nodes
-    UNWIND nodes as n
-    OPTIONAL MATCH (n)-[r]-(m)
-    WHERE m IN nodes
-    RETURN n, collect(distinct r) as rels
-    """ % depth
-    
-    data = {"nodes": [], "edges": []}
-    
-    # query_standard execution removed as it was redundant and incomplete
-    
-    # Let's try a query that returns exactly what we need
-    final_query = """
-    MATCH (start {id:$start_id})-[*0..%d]-(n)
+    # We use the explicit ID query pattern we established earlier
+    final_query = f"""
+    MATCH (start {{id:$start_id}})-[{rel_pattern}*0..{depth}]-(n)
     WITH collect(distinct n) as nodes
     UNWIND nodes as source
-    MATCH (source)-[r]->(target)
+    MATCH (source)-[r{rel_pattern}]->(target)
     WHERE target IN nodes
     RETURN source, r, target
-    """ % depth
+    """
+    
+    data = {"nodes": [], "edges": []}
     
     with neo4j_driver.get_session() as session:
         res = session.run(final_query, start_id=start_id)
@@ -154,134 +110,123 @@ def graph_search(start_id: str, depth: int) -> Dict:
                 
     return data
 
-
 def hybrid_search(query_text: str, vector_weight: float, graph_weight: float, top_k: int, graph_depth: int) -> List[SearchResult]:
+    # 0. Normalize alpha / beta so they sum to 1
+    total = vector_weight + graph_weight
+    if total <= 0:
+        alpha, beta = 1.0, 0.0
+    else:
+        alpha = vector_weight / total
+        beta = graph_weight / total
+
     # 1. NLP Query Parsing (Extract Entities)
     query_entities = []
     if nlp:
         doc = nlp(query_text)
         query_entities = [ent.text for ent in doc.ents]
-    
+
     logger.info(f"Query Entities: {query_entities}")
 
     # 2. Vector Search (Candidates Set A)
-    # Get more candidates to allow re-ranking
     initial_k = top_k * 3
     vector_results = vector_search(query_text, initial_k)
-    
-    # Map doc_id -> SearchResult
+
     candidates: Dict[str, SearchResult] = {r.id: r for r in vector_results}
-    
+
     # 3. Graph Expansion from Query Entities (Candidates Set B)
-    # If we found entities in the query, find documents connected to them
     if query_entities:
         with neo4j_driver.get_session() as session:
-            # Find Entity nodes matching query entities (case-insensitive)
-            # Then find connected Documents
             query_expansion = """
             UNWIND $names AS name
             MATCH (e:Entity) WHERE toLower(e.name) = toLower(name)
             MATCH (e)-[r]-(d:Document)
             RETURN d, r.weight AS edge_weight
-            LIMIT 20
+            LIMIT 50
             """
             res = session.run(query_expansion, names=query_entities)
             for record in res:
-                node = record['d']
-                doc_id = node.get('id')
-                edge_weight = record['edge_weight'] or 1.0
-                
+                node = record["d"]
+                doc_id = node.get("id")
+                edge_weight = record.get("edge_weight", 1.0)
+
                 if doc_id not in candidates:
-                    # New candidate from graph
                     candidates[doc_id] = SearchResult(
                         id=doc_id,
-                        text=node.get('text'),
-                        score=0.0, # Zero vector score for now
+                        text=node.get("text"),
+                        score=0.0,  # vector score placeholder
                         metadata=dict(node),
-                        graph_info={"hops": 1, "expansion_weight": edge_weight}
+                        graph_info={"hops": 1, "expansion_weight": edge_weight},
                     )
                 else:
-                    # Existing candidate, mark as graph-relevant
-                    candidates[doc_id].graph_info["hops"] = 1
-                    candidates[doc_id].graph_info["expansion_weight"] = edge_weight
+                    gi = candidates[doc_id].graph_info
+                    gi["hops"] = 1
+                    gi["expansion_weight"] = edge_weight
 
     if not candidates:
         return []
 
     candidate_ids = list(candidates.keys())
-    
+
     # 4. Graph Scoring (Connectivity)
-    # Calculate degree/connectivity for all candidates
-    query_graph = """
-    UNWIND $candidate_ids AS cid
-    MATCH (c {id:cid})
-    OPTIONAL MATCH (c)-[r]-(nbr)
-    RETURN cid,
-           sum(coalesce(r.weight, 1.0)) AS adj_weight
-    """
-    
-    connectivity_scores = {}
+    connectivity_scores: Dict[str, float] = {}
     with neo4j_driver.get_session() as session:
+        query_graph = """
+        UNWIND $candidate_ids AS cid
+        MATCH (c {id: cid})
+        OPTIONAL MATCH (c)-[r]-(nbr)
+        RETURN cid, sum(coalesce(r.weight, 1.0)) AS adj_weight
+        """
         res = session.run(query_graph, candidate_ids=candidate_ids)
         for record in res:
-            connectivity_scores[record['cid']] = record['adj_weight'] or 0.0
-            
-    # 5. Final Scoring
-    # Formula: final_score = α * vector_score + β * graph_score / (1 + hop_count)
-    
-    # Normalize vector scores
-    max_v_score = max([r.score for r in candidates.values()]) if candidates else 1.0
-    if max_v_score == 0: max_v_score = 1.0
-    
-    # Normalize connectivity scores
-    max_c_score = max(connectivity_scores.values()) if connectivity_scores else 1.0
-    if max_c_score == 0: max_c_score = 1.0
+            connectivity_scores[record["cid"]] = record["adj_weight"] or 0.0
 
-    final_results = []
+    # Choose a scale for saturating graph scores (typical connectivity)
+    if connectivity_scores:
+        avg_c = sum(connectivity_scores.values()) / len(connectivity_scores)
+    else:
+        avg_c = 1.0
+    graph_scale = max(1.0, avg_c)
+
+    final_results: List[SearchResult] = []
+
     for doc_id, r in candidates.items():
-        # Vector Score Component
-        v_score_norm = r.score / max_v_score
-        
-        # Graph Score Component
-        # Base graph score is connectivity (how central/connected is this node?)
-        c_score_raw = connectivity_scores.get(doc_id, 0)
-        c_score_norm = c_score_raw / max_c_score
-        
-        # Hop Count Logic
-        # If it was found via query entity expansion, hops=1 (close).
-        # If it was ONLY vector match, we treat it as hops=0 (it IS the match).
-        # Wait, usually hops=0 is better. 
-        # Let's say:
-        # - Direct Vector Match: hops=0
-        # - Neighbor of Query Entity: hops=1
-        # If both, we take min(hops) -> 0.
-        # But we want to boost nodes that are BOTH vector relevant AND graph relevant.
-        
-        hops = r.graph_info.get("hops", 0) # Default to 0 if vector match
-        
-        # Refined Formula:
-        # graph_score = (connectivity_norm + expansion_bonus) / (1 + hops)
-        # expansion_bonus = 1.0 if found via query entity, else 0.0
-        
-        expansion_bonus = 1.0 if "expansion_weight" in r.graph_info else 0.0
-        
-        # Combine
-        # We use the user's formula: graph_score / (1 + hop_count)
-        # Here graph_score is the connectivity score.
-        
-        g_component = (c_score_norm + expansion_bonus) / (1 + hops)
-        
-        final_score = (vector_weight * v_score_norm) + (graph_weight * g_component)
-        
+        # --- Vector Component ---
+        raw_v = r.score  # FAISS similarity
+        # clamp vector similarity into [0,1]; adjust if your model behaves differently
+        v_score_norm = max(0.0, min(1.0, raw_v))
+
+        # --- Graph Connectivity Component ---
+        c_raw = connectivity_scores.get(doc_id, 0.0)
+        # saturating mapping: 0 -> 0, big -> ~1, no per-query max dependency
+        c_score_norm = 1.0 - math.exp(-c_raw / graph_scale)
+
+        hops = r.graph_info.get("hops", 0)
+
+        # expansion bonus only when graph actually used
+        # expansion_bonus = 1.0 if (beta > 0.6 and "expansion_weight" in r.graph_info) else 0.0
+
+        if beta > 0:
+            g_component = (c_score_norm) / (1 + hops)
+        else:
+            g_component = 0.0
+
+        # --- Final Hybrid Score (bounded in [0,1]) ---
+        final_score = (alpha * v_score_norm) + (beta * g_component)
+
         r.score = final_score
-        r.graph_info.update({
-            "vector_score_norm": v_score_norm,
-            "connectivity_score_norm": c_score_norm,
-            "hops": hops,
-            "expansion_bonus": expansion_bonus
-        })
+        r.graph_info.update(
+            {
+                "raw_vector_score": raw_v,
+                "vector_score_norm": v_score_norm,
+                "connectivity_score_raw": c_raw,
+                "connectivity_score_norm": c_score_norm,
+                "hops": hops,
+                # "expansion_bonus": expansion_bonus,
+                "alpha": alpha,
+                "beta": beta,
+            }
+        )
         final_results.append(r)
-        
-    # Sort by final score
+
     final_results.sort(key=lambda x: x.score, reverse=True)
     return final_results[:top_k]

@@ -77,9 +77,20 @@ elif page == "Search":
     if search_type == "Hybrid":
         col_a, col_b = st.columns(2)
         with col_a:
-            vector_weight = st.slider("Vector Weight (α)", 0.0, 1.0, 0.7)
+            alpha = st.slider("Vector Weight (α)", 0.0, 1.0, 0.7)
         with col_b:
-            graph_weight = st.slider("Graph Weight (β)", 0.0, 1.0, 0.3)
+            beta = 1.0 - alpha
+            st.metric("Graph Weight (β)", f"{beta:.2f}")
+
+        # Normalize so α + β = 1
+        total = alpha + beta
+        if total <= 0:
+            alpha, beta = 1.0, 0.0   # default to pure vector if both zero
+        else:
+            alpha = alpha / total
+            beta = beta/ total
+
+        st.caption(f"Effective Weights → α = {alpha:.2f}, β = {beta:.2f} (normalized)")
     
     if st.button("Search"):
         if query:
@@ -107,18 +118,58 @@ elif page == "Search":
                                         nid = node_data['id']
                                         label = node_data.get('title') or node_data.get('name') or (node_data.get('text')[:15] + "..." if node_data.get('text') else "Node")
                                         color = "#FFFF00" if nid == start_id else ("#FB7E81" if "Entity" in node_data.get("labels", []) or node_data.get("type") else "#97C2FC")
-                                        nodes.append(Node(id=nid, label=label, color=color, size=20))
+                                        nodes.append(Node(id=nid, label=label, color=color, size=18))
                                     
                                     for edge_data in data.get("edges", []):
                                         edges.append(Edge(source=edge_data['source'], target=edge_data['target'], label=edge_data['type'], color="#CCCCCC"))
                                     
-                                    config = Config(width=800, height=600, directed=True, nodeHighlightBehavior=True, highlightColor="#F7A7A6")
+                                    config = Config(width=1000, height=800, directed=True, nodeHighlightBehavior=True, highlightColor="#F7A7A6")
                                     agraph(nodes=nodes, edges=edges, config=config)
                                     
                                     # Also list the nodes found
-                                    st.subheader("Found Nodes")
-                                    for n in nodes:
-                                        st.write(f"- **{n.label}** ({n.id})")
+                                    # -------------------------------
+                                    # Level-wise Indented "Found Nodes"
+                                    # -------------------------------
+
+                                    # Build adjacency list from edges
+                                    # Build adjacency list from raw edge data (NOT Edge objects)
+                                    adj = {}
+                                    for e in data.get("edges", []):
+                                        s = e.get("source")
+                                        t = e.get("target")
+                                        if s is None or t is None:
+                                            continue
+                                        adj.setdefault(s, []).append(t)
+                                        adj.setdefault(t, []).append(s)
+
+                                    # BFS from start_id to compute levels
+                                    levels = {start_id: 0}
+                                    queue = deque([start_id])
+
+                                    while queue:
+                                        current = queue.popleft()
+                                        for nbr in adj.get(current, []):
+                                            if nbr not in levels:
+                                                levels[nbr] = levels[current] + 1
+                                                queue.append(nbr)
+
+                                    # Bucket Node objects by level
+                                    level_buckets = {}
+                                    for node in nodes:
+                                        lvl = levels.get(node.id, -1)  # -1 if not connected in BFS
+                                        level_buckets.setdefault(lvl, []).append(node)
+
+                                    # Display formatted, level-wise list
+                                    st.subheader("📌 Found Nodes (Level-wise)")
+
+                                    for lvl in sorted(level_buckets.keys()):
+                                        st.markdown(f"### Level {lvl}")
+                                        for node in level_buckets[lvl]:
+                                            indent = "&nbsp;" * (lvl * 8)  # HTML indentation
+                                            st.markdown(
+                                                f"{indent}- **{node.label}** (`{node.id}`)",
+                                                unsafe_allow_html=True,
+                                            )
                                 else:
                                     st.error(f"Graph Search Error: {g_res.text}")
                             else:
@@ -136,8 +187,8 @@ elif page == "Search":
                 if search_type == "Hybrid":
                     endpoint = "/search/hybrid"
                     payload.update({
-                        "vector_weight": vector_weight,
-                        "graph_weight": graph_weight,
+                        "vector_weight": alpha,
+                        "graph_weight": beta,
                         "graph_expand_depth": 1
                     })
                 
@@ -155,9 +206,9 @@ elif page == "Search":
                                     
                                     # Badge for Graph Boost
                                     graph_info = item.get('graph_info', {})
-                                    boost_badge = "🚀 Graph Boosted" if graph_info.get("expansion_bonus", 0) > 0 else ""
+                                    # boost_badge = "🚀 Graph Boosted" if graph_info.get("expansion_bonus", 0) > 0 else ""
                                     
-                                    with st.expander(f"{score:.4f} | {title} {boost_badge}"):
+                                    with st.expander(f"{score:.4f} | {title}"):
                                         st.markdown(f"**ID:** `{item['id']}`")
                                         st.write(item.get('text', ''))
                                         
@@ -167,12 +218,12 @@ elif page == "Search":
                                             c1.metric("Vector Score", f"{graph_info.get('vector_score_norm', 0):.2f}")
                                             c2.metric("Connectivity", f"{graph_info.get('connectivity_score_norm', 0):.2f}")
                                             c3.metric("Hops", f"{graph_info.get('hops', 0)}")
-                                            c4.metric("Expansion Bonus", f"{graph_info.get('expansion_bonus', 0)}")
+                                            # c4.metric("Expansion Bonus", f"{graph_info.get('expansion_bonus', 0)}")
                         else:
                             st.error(f"Error: {res.text}")
                     except Exception as e:
                         st.error(f"Connection Error: {e}")
-
+                
 elif page == "Graph Visualization":
     st.header("🕸️ Graph Visualization")
     
@@ -197,58 +248,161 @@ elif page == "Graph Visualization":
                         st.warning("No matching concepts found.")
             except Exception as e:
                 st.error(f"Resolution Error: {e}")
+    max_nodes = st.slider("Max nodes to display", 10, 300, 80, 10)
+    max_neighbors_per_node = st.slider("Max neighbors per node", 2, 30, 10, 1)
+
+    show_documents = st.checkbox("Show Documents", value=True)
+    show_entities = st.checkbox("Show Entities", value=True)
+    show_attributes = st.checkbox("Show Attributes / Values", value=False)  # off by default
+    show_edge_labels_around_start = st.checkbox("Show edge labels only around start node", value=True)  
 
     if st.button("Visualize"):
         if start_id:
             with st.spinner("Fetching graph data..."):
                 try:
-                    res = requests.get(f"{API_URL}/search/graph", params={"start_id": start_id, "depth": 2})
+                    res = requests.get(f"{API_URL}/search/graph", params={"start_id": start_id, "depth": 1})
                     if res.status_code == 200:
                         data = res.json()
-                        
+
+                        raw_nodes = data.get("nodes", [])
+                        raw_edges = data.get("edges", [])
+
+                        # --- Build adjacency for BFS limiting ---
+                        adjacency = {}
+                        for e in raw_edges:
+                            s = e["source"]
+                            t = e["target"]
+                            adjacency.setdefault(s, set()).add(t)
+                            adjacency.setdefault(t, set()).add(s)
+
+                        # --- BFS from start_id, capped by max_nodes & max_neighbors_per_node ---
+                        selected_ids = set([start_id])
+                        queue = [start_id]
+
+                        while queue and len(selected_ids) < max_nodes:
+                            current = queue.pop(0)
+                            neighbors = list(adjacency.get(current, []))[:max_neighbors_per_node]
+                            for nb in neighbors:
+                                if len(selected_ids) >= max_nodes:
+                                    break
+                                if nb not in selected_ids:
+                                    selected_ids.add(nb)
+                                    queue.append(nb)
+
+                        # --- Filter nodes by selected_ids + node-type checkboxes ---
+                        def node_visible(node):
+                            nid = node["id"]
+                            if nid not in selected_ids:
+                                return False
+
+                            labels = node.get("labels", [])
+                            ntype = node.get("type")
+
+                            is_document = "Document" in labels or ntype == "Document"
+                            is_entity = "Entity" in labels or ntype == "Entity"
+                            is_attribute = "Attribute" in labels or "Value" in labels or ntype in ("Attribute", "Value")
+
+                            if is_document and not show_documents:
+                                return False
+                            if is_entity and not show_entities:
+                                return False
+                            if is_attribute and not show_attributes:
+                                return False
+
+                            # default: keep
+                            return True
+
+                        filtered_nodes_data = [n for n in raw_nodes if node_visible(n)]
+                        visible_ids = {n["id"] for n in filtered_nodes_data}
+
+                        # --- Filter edges so both ends are visible & still within BFS set ---
+                        filtered_edges_data = [
+                            e for e in raw_edges
+                            if e["source"] in visible_ids and e["target"] in visible_ids
+                        ]
+
+                        # --- Build Node objects (smaller size, shorter labels, type-based color) ---
                         nodes = []
-                        edges = []
-                        
-                        # Process Nodes
-                        for node_data in data.get("nodes", []):
-                            nid = node_data['id']
-                            label = node_data.get('title') or node_data.get('name') or (node_data.get('text')[:15] + "..." if node_data.get('text') else "Node")
-                            
-                            # Color coding
-                            color = "#97C2FC" # Default Blue (Document)
-                            if "Entity" in node_data.get("labels", []) or node_data.get("type"): # Assuming we might pass labels or infer from props
-                                color = "#FB7E81" # Red (Entity)
-                            # Check if it's the start node
+                        for node_data in filtered_nodes_data:
+                            nid = node_data["id"]
+                            base_label = (
+                                node_data.get("title")
+                                or node_data.get("name")
+                                or node_data.get("text", "Node")
+                            )
+                            # shorter label to avoid clutter
+                            label = (base_label[:30] + "…") if len(base_label) > 30 else base_label
+
+                            labels = node_data.get("labels", [])
+                            ntype = node_data.get("type")
+
+                            # default Document-blue
+                            color = "#97C2FC"
+                            if "Entity" in labels or ntype == "Entity":
+                                color = "#FB7E81"  # red
+                            if "Attribute" in labels or "Value" in labels or ntype in ("Attribute", "Value"):
+                                color = "#9C9C9C"  # grey-ish for low-priority nodes
+
                             if nid == start_id:
-                                color = "#FFFF00" # Yellow
-                            
-                            nodes.append(Node(id=nid, label=label, color=color, size=20))
-                        
-                        # Process Edges
-                        for edge_data in data.get("edges", []):
-                            # Color coding edges
+                                color = "#FFFF00"  # yellow for start node
+
+                            nodes.append(
+                                Node(
+                                    id=nid,
+                                    label=label,
+                                    color=color,
+                                    size=15,  # slightly smaller to reduce overlap
+                                )
+                            )
+
+                        # --- Build Edge objects (optionally label only edges touching start node) ---
+                        edges = []
+                        for edge_data in filtered_edges_data:
+                            etype = edge_data["type"]
                             color = "#CCCCCC"
-                            if edge_data['type'] == "MENTIONS":
-                                color = "#FB7E81" # Redish
-                            elif edge_data['type'] == "RELATED_TO":
-                                color = "#97C2FC" # Blueish
-                                
-                            edges.append(Edge(
-                                source=edge_data['source'], 
-                                target=edge_data['target'], 
-                                label=edge_data['type'],
-                                color=color
-                            ))
-                        
-                        config = Config(width=800, height=600, directed=True, nodeHighlightBehavior=True, highlightColor="#F7A7A6")
+                            if etype == "MENTIONS":
+                                color = "#FB7E81"
+                            elif etype in ("RELATED_TO", "SEMANTIC_NEAR"):
+                                color = "#97C2FC"
+
+                            label = None
+                            if not show_edge_labels_around_start:
+                                label = etype
+                            else:
+                                if edge_data["source"] == start_id or edge_data["target"] == start_id:
+                                    label = etype
+
+                            edges.append(
+                                Edge(
+                                    source=edge_data["source"],
+                                    target=edge_data["target"],
+                                    label=label,
+                                    color=color,
+                                )
+                            )
+
+                        # --- Config: a bit more spacing & collapsible interaction ---
+                        config = Config(
+                            width=1100,
+                            height=800,
+                            directed=True,
+                            nodeHighlightBehavior=True,
+                            highlightColor="#F7A7A6",
+                            collapsible=True,
+                            # react-d3-graph config passthrough
+                            node={"labelPosition": "top"},
+                            link={"renderLabel": True},
+                            d3={"gravity": -250, "linkLength": 140},
+                        )
+
                         agraph(nodes=nodes, edges=edges, config=config)
-                        
-                        st.info(f"Nodes: {len(nodes)}, Edges: {len(edges)}")
-                        
+
+                        st.info(f"Nodes shown: {len(nodes)} (from {len(raw_nodes)} total), "
+                                f"Edges shown: {len(edges)} (from {len(raw_edges)} total)")
                     else:
                         st.error(f"Error: {res.text}")
                 except Exception as e:
-                    st.error(f"Connection Error: {e}")
+                    st.error(f"Connection Error: {e}")          
 
 elif page == "Database Inspector":
     st.header("🕵️ Database Inspector")

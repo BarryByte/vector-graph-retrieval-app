@@ -45,3 +45,22 @@ class SearchResult(BaseModel):
     score: float
     metadata: Optional[Dict[str, Any]] = {}
     graph_info: Optional[Dict[str, Any]] = None
+
+class Concept(BaseModel):
+    id: Optional[str] = None
+    label: Optional[str] = None
+    method: Optional[str] = "kmeans"
+    metadata: Optional[Dict[str, Any]] = {}
+
+class Event(BaseModel):
+    id: Optional[str] = None
+    name: str
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = {}
+
+class AttributeNode(BaseModel):
+    id: Optional[str] = None
+    key: str
+    value: Any
+    metadata: Optional[Dict[str, Any]] = {}
