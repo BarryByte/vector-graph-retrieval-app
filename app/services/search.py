@@ -6,6 +6,7 @@ from typing import List, Dict, Set
 import logging
 import spacy
 import math
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,7 @@ def graph_search(start_id: str, depth: int, relationship_types: List[str] = None
                 
     return data
 
-def hybrid_search(query_text: str, vector_weight: float, graph_weight: float, top_k: int, graph_depth: int) -> List[SearchResult]:
+def hybrid_search(query_text: str, vector_weight: float, graph_weight: float, top_k: int, graph_depth: int, query_embedding: List[float] = None) -> "HybridSearchResponse":
     # 0. Normalize alpha / beta so they sum to 1
     total = vector_weight + graph_weight
     if total <= 0:
@@ -128,8 +129,33 @@ def hybrid_search(query_text: str, vector_weight: float, graph_weight: float, to
     logger.info(f"Query Entities: {query_entities}")
 
     # 2. Vector Search (Candidates Set A)
-    initial_k = top_k * 3
-    vector_results = vector_search(query_text, initial_k)
+    # If query_embedding is provided, use it directly (convert to numpy)
+    # Otherwise, encode query_text
+    if query_embedding:
+        query_vector = np.array(query_embedding, dtype=np.float32)
+        distances, indices = faiss_index.search(query_vector, top_k * 3)
+        vector_results = []
+        for i, idx in enumerate(indices):
+            if idx == -1: continue
+            doc_id = faiss_index.id_map.get(idx)
+            if not doc_id: continue
+            
+            # Fetch details from Neo4j
+            with neo4j_driver.get_session() as session:
+                res = session.run("MATCH (d:Document {id: $id}) RETURN d", id=doc_id)
+                record = res.single()
+                if record:
+                    node = record['d']
+                    vector_results.append(SearchResult(
+                        id=doc_id,
+                        text=node.get('text'),
+                        score=float(distances[i]),
+                        metadata=dict(node),
+                        graph_info={}
+                    ))
+    else:
+        initial_k = top_k * 3
+        vector_results = vector_search(query_text, initial_k)
 
     candidates: Dict[str, SearchResult] = {r.id: r for r in vector_results}
 
@@ -163,7 +189,13 @@ def hybrid_search(query_text: str, vector_weight: float, graph_weight: float, to
                     gi["expansion_weight"] = edge_weight
 
     if not candidates:
-        return []
+        from app.models import HybridSearchResponse
+        return HybridSearchResponse(
+            query_text=query_text,
+            vector_weight=vector_weight,
+            graph_weight=graph_weight,
+            results=[]
+        )
 
     candidate_ids = list(candidates.keys())
 
@@ -187,7 +219,7 @@ def hybrid_search(query_text: str, vector_weight: float, graph_weight: float, to
         avg_c = 1.0
     graph_scale = max(1.0, avg_c)
 
-    final_results: List[SearchResult] = []
+    final_results_items = []
 
     for doc_id, r in candidates.items():
         # --- Vector Component ---
@@ -202,9 +234,6 @@ def hybrid_search(query_text: str, vector_weight: float, graph_weight: float, to
 
         hops = r.graph_info.get("hops", 0)
 
-        # expansion bonus only when graph actually used
-        # expansion_bonus = 1.0 if (beta > 0.6 and "expansion_weight" in r.graph_info) else 0.0
-
         if beta > 0:
             g_component = (c_score_norm) / (1 + hops)
         else:
@@ -213,20 +242,31 @@ def hybrid_search(query_text: str, vector_weight: float, graph_weight: float, to
         # --- Final Hybrid Score (bounded in [0,1]) ---
         final_score = (alpha * v_score_norm) + (beta * g_component)
 
-        r.score = final_score
-        r.graph_info.update(
-            {
-                "raw_vector_score": raw_v,
-                "vector_score_norm": v_score_norm,
-                "connectivity_score_raw": c_raw,
-                "connectivity_score_norm": c_score_norm,
-                "hops": hops,
-                # "expansion_bonus": expansion_bonus,
-                "alpha": alpha,
-                "beta": beta,
-            }
-        )
-        final_results.append(r)
+        # Construct Info Dict
+        info = {
+            "hop": hops,
+            "raw_vector_score": raw_v,
+            "connectivity_score_raw": c_raw
+        }
+        if "expansion_weight" in r.graph_info:
+            info["edge_weight"] = r.graph_info["expansion_weight"]
+        
+        from app.models import HybridSearchResultItem
+        final_results_items.append(HybridSearchResultItem(
+            id=doc_id,
+            text=r.text, # Use text instead of title
+            vector_score=raw_v,
+            graph_score=g_component,
+            final_score=final_score,
+            info=info
+        ))
 
-    final_results.sort(key=lambda x: x.score, reverse=True)
-    return final_results[:top_k]
+    final_results_items.sort(key=lambda x: x.final_score, reverse=True)
+    
+    from app.models import HybridSearchResponse
+    return HybridSearchResponse(
+        query_text=query_text,
+        vector_weight=vector_weight,
+        graph_weight=graph_weight,
+        results=final_results_items[:top_k]
+    )

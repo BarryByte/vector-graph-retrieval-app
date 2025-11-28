@@ -35,6 +35,7 @@ class SearchRequest(BaseModel):
     top_k: int = 10
 
 class HybridSearchRequest(SearchRequest):
+    query_embedding: Optional[List[float]] = None
     vector_weight: float = 0.7
     graph_weight: float = 0.3
     graph_expand_depth: int = 1
@@ -45,6 +46,20 @@ class SearchResult(BaseModel):
     score: float
     metadata: Optional[Dict[str, Any]] = {}
     graph_info: Optional[Dict[str, Any]] = None
+
+class HybridSearchResultItem(BaseModel):
+    id: str
+    text: Optional[str] = None
+    vector_score: float
+    graph_score: float
+    final_score: float
+    info: Dict[str, Any] = {}
+
+class HybridSearchResponse(BaseModel):
+    query_text: str
+    vector_weight: float
+    graph_weight: float
+    results: List[HybridSearchResultItem]
 
 class Concept(BaseModel):
     id: Optional[str] = None

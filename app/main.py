@@ -1,7 +1,7 @@
 # File: app/main.py
 from fastapi import FastAPI, HTTPException, Query
 from app.database import neo4j_driver
-from app.models import DocumentInput, Document, EdgeInput, SearchRequest, HybridSearchRequest, SearchResult, NodeUpdate
+from app.models import DocumentInput, Document, EdgeInput, SearchRequest, HybridSearchRequest, SearchResult, NodeUpdate, HybridSearchResponse
 from app.services.ingestion import ingest_document, create_edge, get_node, update_node, delete_node, get_edge
 from app.services.search import vector_search, graph_search, hybrid_search
 from typing import List
@@ -75,45 +75,6 @@ def read_edge(edge_id: str):
         raise HTTPException(status_code=404, detail="Edge not found")
     return edge
 
-# --- Debug / Inspection ---
-
-@app.get("/debug/documents")
-def get_all_documents():
-    query = "MATCH (d:Document) RETURN d"
-    documents = []
-    with neo4j_driver.get_session() as session:
-        result = session.run(query)
-        for record in result:
-            documents.append(record['d'])
-    return documents
-
-@app.get("/debug/entities")
-def get_all_entities():
-    query = "MATCH (e:Entity) RETURN e"
-    entities = []
-    with neo4j_driver.get_session() as session:
-        result = session.run(query)
-        for record in result:
-            entities.append(record['e'])
-    return entities
-
-@app.get("/debug/faiss/info")
-def get_faiss_info():
-    from app.database import faiss_index
-    return {
-        "total_vectors": faiss_index.count(),
-        "dimension": faiss_index.dimension,
-        "id_map": faiss_index.id_map
-    }
-
-@app.get("/debug/faiss/vector/{vector_id}")
-def get_vector_by_id(vector_id: int):
-    from app.database import faiss_index
-    vector = faiss_index.get_vector(vector_id)
-    if not vector:
-        raise HTTPException(status_code=404, detail="Vector not found")
-    return {"vector_id": vector_id, "embedding": vector}
-
 # --- Search ---
 
 @app.post("/search/vector", response_model=List[SearchResult])
@@ -124,12 +85,13 @@ def search_vector(req: SearchRequest):
 def search_graph(start_id: str, depth: int, relationship_types: List[str] = Query(None)):
     return graph_search(start_id, depth, relationship_types)
 
-@app.post("/search/hybrid", response_model=List[SearchResult])
+@app.post("/search/hybrid", response_model=HybridSearchResponse)
 def search_hybrid(req: HybridSearchRequest):
     return hybrid_search(
         req.query_text, 
         req.vector_weight, 
         req.graph_weight, 
         req.top_k, 
-        req.graph_expand_depth
+        req.graph_expand_depth,
+        req.query_embedding
     )
